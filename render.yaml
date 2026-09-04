@@ -14,8 +14,9 @@ services:
       - key: PORT
         value: "3000"
       - key: ALLOW_ORIGINS
-        # 允许前端跨域访问。把你的 Netlify 地址填进去，多个用逗号分隔；开发时可临时用 *
-        value: "https://bigyellowdog.netlify.app"
+        # 允许前端跨域访问。前端已迁移到 Render 静态站（域名可能变化），用 * 放行所有来源。
+        # 前端请求不带 cookie（无 credentials:include），所以 * 不会触发浏览器限制。
+        value: "*"
       - key: JWT_SECRET
         # 部署后 Render 会自动生成随机值；首次部署可删掉这行让它自动生成
         generateValue: true
