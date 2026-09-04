@@ -18,7 +18,9 @@ services:
         # 前端请求不带 cookie（无 credentials:include），所以 * 不会触发浏览器限制。
         value: "*"
       - key: JWT_SECRET
-        # 部署后 Render 会自动生成随机值；首次部署可删掉这行让它自动生成
+        # 部署后 Render 会自动生成随机值，且持久保存（重新部署不会变，token 不掉线）
         generateValue: true
-      - key: DATA_DIR
-        value: "./data"
+      - key: GH_DATA_REPO
+        value: "ZXLl0928/bigyellowdog-data"
+      - key: GH_TOKEN
+        sync: false   # 值不入库（避免公开泄露）；由控制台或 API 手动设置，Blueprint 同步不会清除
