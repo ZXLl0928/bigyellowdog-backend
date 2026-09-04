@@ -24,3 +24,6 @@ services:
         value: "ZXLl0928/bigyellowdog-data"
       - key: GH_TOKEN
         sync: false   # 值不入库（避免公开泄露）；由控制台或 API 手动设置，Blueprint 同步不会清除
+      - key: ZHIPU_KEY
+        sync: false   # 智谱 BigModel API Key：owner 在 Render 控制台设置一次，全团队免配 Key 即可用 AI 出稿；不入库避免泄露
+
