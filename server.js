@@ -31,18 +31,63 @@ app.use((req, res, next) => {
   next();
 });
 
-/* ---------- 文件存储 ---------- */
-const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
-fs.mkdirSync(DATA_DIR, { recursive: true });
-const USERS_FILE = path.join(DATA_DIR, 'users.json');
-const BOARD_FILE = path.join(DATA_DIR, 'board.json');
-const readJSON = (f, d) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch (e) { return d; } };
-const writeJSON = (f, o) => { fs.writeFileSync(f, JSON.stringify(o, null, 2)); };
-let users = readJSON(USERS_FILE, []);
-let board = readJSON(BOARD_FILE, { state: { videos: [], hotspots: [], accounts: [], festivals: [] }, updated_by: null, updated_at: null });
+/* ---------- GitHub 持久化存储（解决 Render 临时磁盘丢数据问题） ---------- */
+const GH_TOKEN = process.env.GH_TOKEN || '';
+const GH_REPO = process.env.GH_DATA_REPO || 'ZXLl0928/bigyellowdog-data';
+const GH_BRANCH = process.env.GH_BRANCH || 'main';
+const ghH = { 'Authorization': 'Bearer ' + GH_TOKEN, 'User-Agent': 'bigyellowdog', 'Content-Type': 'application/json', 'Accept': 'application/vnd.github+json' };
+
+async function ghGet(p) {
+  const r = await fetch(`https://api.github.com/repos/${GH_REPO}/contents/${encodeURIComponent(p)}?ref=${GH_BRANCH}`, { headers: ghH });
+  if (r.status === 404) return { content: null, sha: null };
+  if (!r.ok) throw new Error('gh GET ' + p + ' -> ' + r.status);
+  const j = await r.json();
+  return { content: Buffer.from(j.content, 'base64').toString('utf8'), sha: j.sha };
+}
+async function ghPut(p, content) {
+  let sha = null;
+  try { const cur = await ghGet(p); sha = cur.sha; } catch (e) {}
+  const body = { message: 'update ' + p, content: Buffer.from(content, 'utf8').toString('base64'), branch: GH_BRANCH };
+  if (sha) body.sha = sha;
+  let r = await fetch(`https://api.github.com/repos/${GH_REPO}/contents/${encodeURIComponent(p)}`, { method: 'PUT', headers: ghH, body: JSON.stringify(body) });
+  if (r.status === 409) {
+    try { const cur = await ghGet(p); sha = cur.sha; } catch (e) {}
+    const body2 = { message: 'update ' + p, content: Buffer.from(content, 'utf8').toString('base64'), branch: GH_BRANCH };
+    if (sha) body2.sha = sha;
+    r = await fetch(`https://api.github.com/repos/${GH_REPO}/contents/${encodeURIComponent(p)}`, { method: 'PUT', headers: ghH, body: JSON.stringify(body2) });
+  }
+  if (!r.ok) throw new Error('gh PUT ' + p + ' -> ' + r.status);
+  const j = await r.json();
+  return j.content ? j.content.sha : null;
+}
+
+let users = [];
+let board = { state: { videos: [], hotspots: [], accounts: [], festivals: [] }, updated_by: null, updated_at: null };
+let saveQueue = Promise.resolve();
+
+async function loadStore() {
+  try { const u = await ghGet('users.json'); if (u.content) users = JSON.parse(u.content); } catch (e) { console.error('[store] load users failed:', e.message); }
+  try { const b = await ghGet('board.json'); if (b.content) board = JSON.parse(b.content); } catch (e) { console.error('[store] load board failed:', e.message); }
+}
+function saveUsers() {
+  const snap = JSON.stringify(users, null, 2);
+  saveQueue = saveQueue.then(() => ghPut('users.json', snap)).catch(e => console.error('[store] save users failed:', e.message));
+  return saveQueue;
+}
+function saveBoard() {
+  const snap = JSON.stringify(board, null, 2);
+  saveQueue = saveQueue.then(() => ghPut('board.json', snap)).catch(e => console.error('[store] save board failed:', e.message));
+  return saveQueue;
+}
 
 /* ---------- 密码 & Token ---------- */
-const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(32).toString('hex');
+let JWT_SECRET = process.env.JWT_SECRET || '';
+async function ensureSecret() {
+  if (JWT_SECRET) return;
+  try { const s = await ghGet('secret.json'); if (s.content && s.content.trim()) { JWT_SECRET = s.content.trim(); return; } } catch (e) {}
+  JWT_SECRET = crypto.randomBytes(32).toString('hex');
+  try { await ghPut('secret.json', JWT_SECRET); } catch (e) { console.error('[store] save secret failed:', e.message); }
+}
 function hashPwd(pwd) { const s = crypto.randomBytes(16).toString('hex'); const h = crypto.scryptSync(pwd, s, 64).toString('hex'); return s + ':' + h; }
 function verifyPwd(pwd, stored) {
   const [s, h] = (stored || '').split(':'); if (!s || !h) return false;
@@ -78,16 +123,16 @@ function auth(req, res, next) {
 const publicUser = u => ({ id: u.id, email: u.email, displayName: u.displayName, role: u.role, created_at: u.created_at });
 
 /* ---------- 健康检查 ---------- */
-app.get('/api/health', (req, res) => res.json({ ok: true, users: users.length, ts: Date.now() }));
+app.get('/api/health', (req, res) => res.json({ ok: true, users: users.length, ts: Date.now(), store: GH_TOKEN ? 'github:' + GH_REPO : 'memory' }));
 
 /* ---------- 注册 / 登录 ---------- */
-app.post('/api/signup', (req, res) => {
+app.post('/api/signup', async (req, res) => {
   const { email, password, displayName } = req.body || {};
   if (!email || !password || password.length < 6) return res.status(400).json({ error: '邮箱和密码(≥6位)必填' });
   if (users.find(u => u.email === email)) return res.status(400).json({ error: '该邮箱已注册' });
   const role = users.length === 0 ? 'owner' : 'member';
   const u = { id: crypto.randomUUID(), email, password: hashPwd(password), displayName: displayName || email.split('@')[0], role, created_at: new Date().toISOString(), disabled: false };
-  users.push(u); writeJSON(USERS_FILE, users);
+  users.push(u); await saveUsers();
   res.json({ token: signToken(u.id), user: publicUser(u) });
 });
 app.post('/api/login', (req, res) => {
@@ -99,28 +144,28 @@ app.post('/api/login', (req, res) => {
 
 /* ---------- 共享看板 ---------- */
 app.get('/api/board', auth, (req, res) => res.json({ state: board.state, updated_by: board.updated_by, updated_at: board.updated_at }));
-app.post('/api/board', auth, (req, res) => {
+app.post('/api/board', auth, async (req, res) => {
   const st = req.body && req.body.state ? req.body.state : req.body;
   if (!st || typeof st !== 'object') return res.status(400).json({ error: 'invalid body' });
   board.state = st; board.updated_by = req.user.id; board.updated_at = new Date().toISOString();
-  writeJSON(BOARD_FILE, board);
+  await saveBoard();
   broadcast({ type: 'board', state: board.state, updated_by: board.updated_by, updated_at: board.updated_at });
   res.json({ ok: true });
 });
 
 /* ---------- 成员管理（仅 owner） ---------- */
 app.get('/api/members', auth, (req, res) => res.json(users.filter(u => !u.disabled).map(publicUser)));
-app.patch('/api/members/:id', auth, (req, res) => {
+app.patch('/api/members/:id', auth, async (req, res) => {
   if (req.user.role !== 'owner') return res.status(403).json({ error: '仅管理员可管理成员' });
   const t = users.find(u => u.id === req.params.id && !u.disabled); if (!t) return res.status(404).json({ error: 'not found' });
   if (req.body && req.body.role) t.role = req.body.role === 'owner' ? 'owner' : 'member';
-  writeJSON(USERS_FILE, users); res.json({ ok: true });
+  await saveUsers(); res.json({ ok: true });
 });
-app.delete('/api/members/:id', auth, (req, res) => {
+app.delete('/api/members/:id', auth, async (req, res) => {
   if (req.user.role !== 'owner') return res.status(403).json({ error: '仅管理员可管理成员' });
   const t = users.find(u => u.id === req.params.id); if (!t) return res.status(404).json({ error: 'not found' });
   if (t.id === req.user.id) return res.status(400).json({ error: '不能移除自己' });
-  t.disabled = true; writeJSON(USERS_FILE, users); res.json({ ok: true });
+  t.disabled = true; await saveUsers(); res.json({ ok: true });
 });
 
 /* ---------- 扒热点代理（解决同事跨域 / 无本机服务） ---------- */
@@ -146,7 +191,8 @@ app.get('/api/hot', async (req, res) => {
   res.status(502).json({ error: '热点源暂不可用，请稍后重试' });
 });
 
-/* ---------- 启动 HTTP + WebSocket ---------- */
+/* ---------- 启动（先加载持久化数据，再监听端口） ---------- */
+const PORT = process.env.PORT || 3000;
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: '/ws' });
 function broadcast(obj) { const m = JSON.stringify(obj); wss.clients.forEach(c => { if (c.readyState === 1) try { c.send(m); } catch (e) { } }); }
@@ -160,5 +206,8 @@ wss.on('connection', (ws, req) => {
   ws.send(JSON.stringify({ type: 'hello', role: u.role }));
 });
 
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log('[bigyellowdog-api] listening on ' + PORT + ' · users=' + users.length));
+(async () => {
+  await loadStore();
+  await ensureSecret();
+  server.listen(PORT, () => console.log('[bigyellowdog-api] listening on ' + PORT + ' · users=' + users.length + (GH_TOKEN ? ' · store=github:' + GH_REPO : ' · store=MEMORY-ONLY')));
+})();
