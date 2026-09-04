@@ -247,6 +247,87 @@ app.post('/api/zhipu/v4/chat/completions', async (req, res) => {
   } finally { clearTimeout(t); }
 });
 
+/* ---------- 爆款链接解析（让爆款库能「链接 → 自动取标题+文案」） ----------
+ * 当前支持能力：
+ *  - 抖音：iesdouyin share 页 SSR（方案来自 douyin-downloader skill），提取 videoInfoRes.item_list[0]
+ *          的 desc / author.nickname（desc 通常是用户简介，往往不是完整口播文案，仅作识别用）
+ *  - 小红书 / B站 / 视频号 / TikTok：当前仅识别 platform（反爬严，提示用户手动粘文案）
+ * 失败 / 反爬时返回 script: '' 并给 msg，前端降级显示「请手动粘文案」
+ * ─────────────────────────────────────────────────────────────────────────── */
+async function _parseDouyinById(videoId) {
+  const ctrl = new AbortController(); const t = setTimeout(() => ctrl.abort(), 12000);
+  try {
+    const r = await fetch(`https://www.iesdouyin.com/share/video/${videoId}/?region=CN&aid=6383`, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+        'Referer': 'https://www.douyin.com/'
+      },
+      signal: ctrl.signal
+    });
+    clearTimeout(t);
+    if (!r.ok) return null;
+    const html = await r.text();
+    // 兼容两种：window._ROUTER_DATA = {...}; 或 window.__INIT_PROPS__ 形式
+    const m1 = html.match(/window\._ROUTER_DATA\s*=\s*(\{.+?\});\s*<\/script>/);
+    const m2 = m1 ? null : html.match(/"videoInfoRes":\s*(\{.+?\})\s*,\s*"(?:tagList|commentList|shareUrl)"/);
+    if (m1) {
+      const router = JSON.parse(m1[1]);
+      for (const key of Object.keys(router?.loaderData || {})) {
+        const vi = router.loaderData[key]?.videoInfoRes?.item_list?.[0];
+        if (vi) return { title: (vi.desc||'').slice(0, 200), script: vi.desc || '', author: vi.author?.nickname || '', cover: (vi.video?.cover?.[0]?.url_list?.[0]) || '' };
+      }
+    }
+    if (m2) {
+      try {
+        const info = JSON.parse(m2[1]);
+        const it = info?.item_list?.[0];
+        if (it) return { title: (it.desc||'').slice(0, 200), script: it.desc || '', author: it.author?.nickname || '', cover: (it.video?.cover?.[0]?.url_list?.[0]) || '' };
+      } catch (e) {}
+    }
+    return null;
+  } catch (e) { try { clearTimeout(t); } catch (e2) {} return null; }
+}
+
+app.get('/api/blowout/parse', async (req, res) => {
+  const url = (req.query.url || '').toString().trim();
+  if (!url) return res.status(400).json({ ok: false, error: 'url 不能为空' });
+  const data = { platform: '其他', title: '', script: '', author: '', cover: '', videoId: '', source: 'none', msg: '' };
+  try {
+    if (/douyin\.com|iesdouyin\.com/.test(url)) {
+      data.platform = '抖音';
+      const m = url.match(/video\/(\d+)/) || url.match(/(\d{10,20})/);
+      if (m) {
+        data.videoId = m[1];
+        const r = await _parseDouyinById(m[1]);
+        if (r) {
+          data.title = r.title; data.script = r.script; data.author = r.author; data.cover = r.cover;
+          data.source = 'iesdouyin';
+        } else {
+          data.msg = '抖音：未能拿到 desc（可能反爬限速）；视频号/B站等请手动粘文案。';
+          data.source = 'fallback';
+        }
+      } else {
+        data.msg = '抖音链接里没找到 videoId';
+      }
+    } else if (/xiaohongshu\.com|xhslink\.com/.test(url)) {
+      data.platform = '小红书'; data.msg = '小红书反爬严，自动识别受限，请手动粘文案';
+    } else if (/bilibili\.com|b23\.tv/.test(url)) {
+      data.platform = 'B站'; data.msg = 'B站自动识别受限，请手动粘文案';
+    } else if (/mp\.video\.weixin|视频号|channels\.weixin/.test(url)) {
+      data.platform = '视频号'; data.msg = '视频号自动识别受限，请手动粘文案';
+    } else if (/tiktok\.com/.test(url)) {
+      data.platform = 'TikTok'; data.msg = 'TikTok 自动识别受限，请手动粘文案';
+    } else {
+      data.msg = '未识别的平台';
+    }
+    res.json({ ok: true, data });
+  } catch (e) {
+    res.json({ ok: false, error: e.message || '解析失败' });
+  }
+});
+
 /* ---------- 启动（先加载持久化数据，再监听端口） ---------- */
 const PORT = process.env.PORT || 3000;
 const server = http.createServer(app);
