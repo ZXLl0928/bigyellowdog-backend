@@ -169,23 +169,50 @@ app.delete('/api/members/:id', auth, async (req, res) => {
 });
 
 /* ---------- 扒热点代理（解决同事跨域 / 无本机服务） ---------- */
+/* 混合源：uapis 用 async 函数（输出已标准化），旧源用 URL 模板 */
 const HOT_SOURCES = [
-  r => `https://api-hot.imsyy.top/${r}?limit=${'_LIMIT_'}&cache=false`,
-  r => `https://api.vvhan.com/api/hotlist/douyin?type=${r}`,
-  r => `https://60s.viki.moe/v2/${r}`
+  // 第一源：uapis.cn —— 免费、免 key、40+ 平台、Render 海外节点直连 OK
+  // 6+ 平台全支持：douyin/weibo/zhihu/bilibili/xiaohongshu/toutiao/baidu/36kr/sspai/ithome/huxiu/kuaishou/csdn/thepaper/qq-news/netease-news
+  async (r) => {
+    const u = `https://uapis.cn/api/v1/misc/hotboard?type=${encodeURIComponent(r)}&limit=30`;
+    const ctrl = new AbortController(); const t = setTimeout(() => ctrl.abort(), 8000);
+    try {
+      const resp = await fetch(u, { signal: ctrl.signal }); clearTimeout(t);
+      if (!resp.ok) return null;
+      const j = await resp.json();
+      if (!j || !j.list) return null;
+      // 标准化输出：list → data, hot_value → hot
+      const data = j.list.map(it => ({ title: it.title, url: it.url, hot: it.hot_value || 0 }));
+      if (!data.length) return null;
+      return { source: 'uapis', data };
+    } catch (e) { clearTimeout(t); return null; }
+  },
+  // 旧源兜底（防 uapis 抽风或新增 uapis 不支持的平台）
+  r => ({ url: `https://api-hot.imsyy.top/${r}?limit=${'_LIMIT_'}&cache=false`, transform: j => (j && j.data) || [] }),
+  r => ({ url: `https://api.vvhan.com/api/hotlist/${r}`, transform: j => (j && j.data) || [] }),
+  r => ({ url: `https://60s.viki.moe/v2/${r}`, transform: j => (j && j.data) || [] })
 ];
 app.get('/api/hot', async (req, res) => {
   const route = (req.query.route || 'douyin').toString().replace(/[^a-z0-9-]/gi, '');
   const limit = Math.min(parseInt(req.query.limit || '20', 10) || 20, 50);
   for (const mk of HOT_SOURCES) {
-    const u = mk(route).replace('_LIMIT_', String(limit));
     try {
-      const ctrl = new AbortController(); const t = setTimeout(() => ctrl.abort(), 12000);
-      const r = await fetch(u, { signal: ctrl.signal }); clearTimeout(t);
-      if (!r.ok) continue;
-      const j = await r.json();
-      const data = (j && j.data) || [];
-      if (data.length) return res.json({ source: u, data });
+      const out = await mk(route);
+      if (!out) continue;
+      // async 函数源（uapis）：直接返回 {source, data}
+      if (out.source && out.data) {
+        return res.json({ source: out.source + ':' + route, data: out.data.slice(0, limit) });
+      }
+      // 字符串模板源（旧的）：fetch + transform
+      if (out.url) {
+        const u = out.url.replace('_LIMIT_', String(limit));
+        const ctrl = new AbortController(); const t = setTimeout(() => ctrl.abort(), 10000);
+        const r = await fetch(u, { signal: ctrl.signal }); clearTimeout(t);
+        if (!r.ok) continue;
+        const j = await r.json();
+        const data = (out.transform ? out.transform(j) : (j && j.data)) || [];
+        if (data.length) return res.json({ source: u, data });
+      }
     } catch (e) { /* 尝试下一个源 */ }
   }
   res.status(502).json({ error: '热点源暂不可用，请稍后重试' });
