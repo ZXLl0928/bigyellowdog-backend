@@ -218,6 +218,35 @@ app.get('/api/hot', async (req, res) => {
   res.status(502).json({ error: '热点源暂不可用，请稍后重试' });
 });
 
+/* ---------- 智谱代理（owner 在 Render 配 ZHIPU_KEY 一次，全团队免配 Key 即可用 AI） ---------- */
+const ZHIPU_KEY = process.env.ZHIPU_KEY || '';
+const ZHIPU_MODELS = ['glm-5.3', 'glm-4-flash', 'glm-4-plus', 'glm-4-air'];
+
+app.get('/api/zhipu/ping', (req, res) => {
+  res.json({ ok: true, configured: !!ZHIPU_KEY, models: ZHIPU_MODELS });
+});
+
+app.post('/api/zhipu/v4/chat/completions', async (req, res) => {
+  if (!ZHIPU_KEY) return res.status(200).json({ ok: false, error: 'ZHIPU_KEY 未配置（请 owner 在 Render 控制台设置后端环境变量 ZHIPU_KEY）' });
+  const { messages, model } = req.body || {};
+  if (!Array.isArray(messages) || !messages.length) return res.status(200).json({ ok: false, error: 'messages 为空' });
+  const useModel = ZHIPU_MODELS.includes(model) ? model : 'glm-5.3';
+  const ctrl = new AbortController(); const t = setTimeout(() => ctrl.abort(), 50000);
+  try {
+    const r = await fetch('https://open.bigmodel.cn/api/paas/v4/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + ZHIPU_KEY },
+      body: JSON.stringify({ model: useModel, messages, temperature: 0.8, top_p: 0.8, max_tokens: 4000, stream: false }),
+      signal: ctrl.signal
+    });
+    const j = await r.json();
+    if (!r.ok) return res.status(200).json({ ok: false, error: (j.error && j.error.message) || ('HTTP ' + r.status) });
+    res.json({ ok: true, raw: j, model_used: useModel });
+  } catch (e) {
+    res.status(200).json({ ok: false, error: e.name === 'AbortError' ? '超时 50s' : (e.message || '智谱请求失败') });
+  } finally { clearTimeout(t); }
+});
+
 /* ---------- 启动（先加载持久化数据，再监听端口） ---------- */
 const PORT = process.env.PORT || 3000;
 const server = http.createServer(app);
