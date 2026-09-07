@@ -26,4 +26,6 @@ services:
         sync: false   # 值不入库（避免公开泄露）；由控制台或 API 手动设置，Blueprint 同步不会清除
       - key: ZHIPU_KEY
         sync: false   # 智谱 BigModel API Key：owner 在 Render 控制台设置一次，全团队免配 Key 即可用 AI 出稿；不入库避免泄露
+      - key: SILICONFLOW_KEY
+        sync: false   # 硅基流动 API Key（稳定免费备用通道，一个 Key 调 100+ 开源模型）：owner 在 Render 控制台设置后启用；不入库避免泄露
 
