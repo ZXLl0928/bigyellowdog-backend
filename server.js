@@ -357,6 +357,47 @@ app.get('/api/engines', (req, res) => {
   res.json({ zhipu: { configured: !!ZHIPU_KEY, models: ZHIPU_MODELS }, siliconflow: { configured: !!SILICONFLOW_KEY } });
 });
 
+/* ---------- 标题批量翻译（用于 HN/英文热点的中文化；走智谱 glm-4-flash 免费档） ----------
+ * POST /api/translate { texts: ["title1","title2",...], target: 'zh-CN' } → { translated: [...] }
+ * - 已含中文字符占比 > 30% 的标题直接原样返回（不调模型，省 token + 提高稳定性）
+ * - 一次最多 50 条；超出会被截断
+ * - 失败时整批返回原文（不阻塞前端）
+ * ─────────────────────────────────────────────────────────────────────────── */
+app.post('/api/translate', async (req, res) => {
+  const { texts, target = 'zh-CN' } = req.body || {};
+  if (!Array.isArray(texts) || !texts.length) return res.status(400).json({ ok: false, error: 'texts 必须是非空数组' });
+  if (!ZHIPU_KEY) return res.status(200).json({ ok: false, error: 'ZHIPU_KEY 未配置', translated: texts }); // 静默降级
+  const items = texts.slice(0, 50).map(t => String(t || '').slice(0, 280));
+  // 过滤：含中文字符占比 > 30% 的标题不翻译
+  const hasChinese = s => (s.match(/[一-龥]/g) || []).length / Math.max(1, s.length);
+  const needIdx = items.map((t, i) => hasChinese(t) > 0.3 ? -1 : i).filter(i => i >= 0);
+  if (!needIdx.length) return res.json({ ok: true, translated: items, skipped: items.length });
+  const prompt = `请把下面 ${needIdx.length} 条英文/外文标题翻译成简洁通顺的简体中文，适合做短视频脚本标题（不超过 24 字，不要 emoji，不要加引号）。
+原标题用 <i>0</i>、<i>1</i>、<i>2</i>……占位符分隔（不要保留占位符本身），按相同顺序输出，每行一条，只输出翻译结果。
+${needIdx.map((i, k) => `<i>${k}</i> ${items[i]}`).join('\n')}`;
+  const ctrl = new AbortController(); const t = setTimeout(() => ctrl.abort(), 60000);
+  try {
+    const r = await fetch('https://open.bigmodel.cn/api/paas/v4/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + ZHIPU_KEY },
+      body: JSON.stringify({ model: 'glm-4-flash', messages: [{ role: 'user', content: prompt }], temperature: 0.3, top_p: 0.9, max_tokens: 2000 }),
+      signal: ctrl.signal
+    });
+    clearTimeout(t);
+    if (!r.ok) { const ej = await r.json().catch(() => ({})); return res.status(200).json({ ok: false, error: (ej.error && ej.error.message) || ('HTTP ' + r.status), translated: items }); }
+    const j = await r.json();
+    const txt = (j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content) || '';
+    // 按行拆；允许 <i>N</i> 前缀残留
+    const lines = txt.split(/\n+/).map(s => s.trim()).filter(Boolean).map(s => s.replace(/^<i>\d+<\/i>\s*/, ''));
+    const out = items.slice();
+    needIdx.forEach((origIdx, k) => { out[origIdx] = (lines[k] || items[origIdx]).trim(); });
+    res.json({ ok: true, translated: out, model_used: 'glm-4-flash' });
+  } catch (e) {
+    try { clearTimeout(t); } catch (_) {}
+    res.status(200).json({ ok: false, error: e.name === 'AbortError' ? '翻译超时' : (e.message || '翻译失败'), translated: items });
+  }
+});
+
 app.post('/api/siliconflow/v4/chat/completions', async (req, res) => {
   if (!SILICONFLOW_KEY) return res.status(200).json({ ok: false, error: 'SILICONFLOW_KEY 未配置（owner 在 Render 控制台设置环境变量 SILICONFLOW_KEY 即可启用免费备用通道）' });
   const { messages, model = 'deepseek-ai/DeepSeek-V3', stream } = req.body || {};
