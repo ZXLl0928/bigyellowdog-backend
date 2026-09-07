@@ -387,8 +387,8 @@ ${needIdx.map((i, k) => `<i>${k}</i> ${items[i]}`).join('\n')}`;
     if (!r.ok) { const ej = await r.json().catch(() => ({})); return res.status(200).json({ ok: false, error: (ej.error && ej.error.message) || ('HTTP ' + r.status), translated: items }); }
     const j = await r.json();
     const txt = (j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content) || '';
-    // 按行拆；允许 <i>N</i> 前缀残留
-    const lines = txt.split(/\n+/).map(s => s.trim()).filter(Boolean).map(s => s.replace(/^<i>\d+<\/i>\s*/, ''));
+    // 按行拆；允许 <i>N</i> 前缀残留；也清理纯数字前缀 "0 "、"1."、"2)"
+    const lines = txt.split(/\n+/).map(s => s.trim()).filter(Boolean).map(s => s.replace(/^(?:<i>\d+<\/i>|\[\d+\]|\(\d+\)|\d+[\.\)、])\s*/, ''));
     const out = items.slice();
     needIdx.forEach((origIdx, k) => { out[origIdx] = (lines[k] || items[origIdx]).trim(); });
     res.json({ ok: true, translated: out, model_used: 'glm-4-flash' });
