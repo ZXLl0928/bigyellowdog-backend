@@ -218,43 +218,18 @@ app.get('/api/hot', async (req, res) => {
   res.status(502).json({ error: '热点源暂不可用，请稍后重试' });
 });
 
-/* Reddit 代理：解决浏览器 CORS；服务端直接 fetch 转发回简化的标题/链接/分数 */
-app.get('/api/reddit', async (req, res) => {
-  const sub = (req.query.sub || '').toString().replace(/[^a-zA-Z0-9_]/g, '').slice(0, 32);
-  const limit = Math.min(parseInt(req.query.limit || '8', 10) || 8, 20);
-  if (!sub) return res.status(400).json({ error: 'sub required' });
-  try {
-    const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), 12000);
-    const r = await fetch('https://www.reddit.com/r/' + sub + '/top.json?limit=' + limit + '&t=week', {
-      signal: ctrl.signal,
-      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; YellowDogHotBot/1.0; +https://bigyellowdog-web.onrender.com)' }
-    });
-    clearTimeout(t);
-    if (!r.ok) return res.status(502).json({ error: 'Reddit returned ' + r.status });
-    const j = await r.json();
-    const items = (j && j.data && j.data.children || []).map(c => ({
-      title: c.data.title,
-      url: 'https://www.reddit.com' + c.data.permalink,
-      score: c.data.score || 0,
-      num_comments: c.data.num_comments || 0,
-      subreddit: sub
-    })).filter(x => x.title);
-    res.json({ source: 'reddit:' + sub, data: items });
-  } catch (e) {
-    res.status(502).json({ error: e.message || 'reddit fetch failed' });
-  }
-});
-
-/* Hacker News Algolia 代理：50+ 关键词搜索（AI 工具 / 跨境电商 趋势） */
+/* Hacker News Algolia 代理：50+ 关键词搜索（AI 工具 / 跨境电商 趋势）；支持 tag 过滤如 show_hn */
 app.get('/api/hn', async (req, res) => {
   const query = (req.query.query || '').toString().slice(0, 120);
-  const limit = Math.min(parseInt(req.query.limit || '4', 10) || 4, 10);
-  if (!query) return res.status(400).json({ error: 'query required' });
+  const tag = (req.query.tag || 'story').toString().slice(0, 32).replace(/[^a-z_]/g, '');
+  const limit = Math.min(parseInt(req.query.limit || '4', 10) || 4, 20);
   try {
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), 10000);
-    const r = await fetch('https://hn.algolia.com/api/v1/search?query=' + encodeURIComponent(query) + '&tags=story&hitsPerPage=' + limit, {
+    const url = (tag === 'show_hn')
+      ? 'https://hn.algolia.com/api/v1/search_by_date?tags=show_hn&hitsPerPage=' + limit
+      : 'https://hn.algolia.com/api/v1/search?query=' + encodeURIComponent(query) + '&tags=' + tag + '&hitsPerPage=' + limit;
+    const r = await fetch(url, {
       signal: ctrl.signal,
       headers: { 'User-Agent': 'Mozilla/5.0 (compatible; YellowDogHotBot/1.0; +https://bigyellowdog-web.onrender.com)' }
     });
@@ -267,9 +242,45 @@ app.get('/api/hn', async (req, res) => {
       url: h.url,
       score: h.points || 0
     })).filter(x => x.title);
-    res.json({ source: 'hn:' + query, data: items });
+    res.json({ source: 'hn:' + (query || tag), data: items });
   } catch (e) {
     res.status(502).json({ error: e.message || 'hn fetch failed' });
+  }
+});
+
+/* RSS 代理：国内 AI 资讯（机器之心等），简单 XML→JSON 解析，只取 title/link/pubDate */
+app.get('/api/rss', async (req, res) => {
+  const url = (req.query.url || '').toString().slice(0, 300);
+  if (!url || !/^https?:\/\//i.test(url)) return res.status(400).json({ error: 'valid url required' });
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 12000);
+    const r = await fetch(url, { signal: ctrl.signal, redirect: 'follow', headers: { 'User-Agent': 'Mozilla/5.0 (compatible; YellowDogHotBot/1.0)' } });
+    clearTimeout(t);
+    if (!r.ok) return res.status(502).json({ error: 'rss upstream ' + r.status });
+    const xml = await r.text();
+    // 简单解析 <item> 或 <entry> 块
+    const items = [];
+    const itemRe = /<item[\s\S]*?<\/item>|<entry[\s\S]*?<\/entry>/gi;
+    const titleRe = /<title[^>]*>(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?<\/title>/i;
+    const linkRe = /<link[^>]*?href=["']([^"']+)["']|<link[^>]*>([\s\S]*?)<\/link>/i;
+    const pubRe = /<pubDate[^>]*>([\s\S]*?)<\/pubDate>|<published[^>]*>([\s\S]*?)<\/published>/i;
+    let m;
+    while ((m = itemRe.exec(xml))) {
+      const block = m[0];
+      const tm = block.match(titleRe);
+      const lm = block.match(linkRe);
+      const pm = block.match(pubRe);
+      if (!tm) continue;
+      const title = tm[1].replace(/<!\[CDATA\[|\]\]>/g, '').trim().slice(0, 200);
+      const link = (lm && (lm[1] || lm[2] || '').trim()) || '';
+      const pub = (pm && (pm[1] || pm[2] || '').trim()) || '';
+      if (title) items.push({ title, url: link, pubDate: pub });
+      if (items.length >= 30) break;
+    }
+    res.json({ source: url, count: items.length, data: items });
+  } catch (e) {
+    res.status(502).json({ error: e.message || 'rss fetch failed' });
   }
 });
 
