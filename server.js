@@ -219,7 +219,13 @@ app.get('/api/hot', async (req, res) => {
 });
 
 /* ---------- 智谱代理（owner 在 Render 配 ZHIPU_KEY 一次，全团队免配 Key 即可用 AI） ---------- */
-const ZHIPU_KEY = process.env.ZHIPU_KEY || '';
+// 清洗 Key：去掉首尾空格 / 换行 / 以及用户可能误填的 "Bearer " 前缀（否则会变成 "Bearer Bearer xxx" 被智谱拒）
+function normalizeZhipuKey(raw){
+  let k=(raw||'').trim();
+  k=k.replace(/^Bearer\s*/i, '');   // 去掉用户可能误填的 "Bearer " / "Bearer" 前缀
+  return k.trim();
+}
+const ZHIPU_KEY = normalizeZhipuKey(process.env.ZHIPU_KEY || '');
 const ZHIPU_MODELS = ['glm-5.3', 'glm-4-flash', 'glm-4-plus', 'glm-4-air'];
 
 app.get('/api/zhipu/ping', (req, res) => {
