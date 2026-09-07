@@ -218,6 +218,61 @@ app.get('/api/hot', async (req, res) => {
   res.status(502).json({ error: '热点源暂不可用，请稍后重试' });
 });
 
+/* Reddit 代理：解决浏览器 CORS；服务端直接 fetch 转发回简化的标题/链接/分数 */
+app.get('/api/reddit', async (req, res) => {
+  const sub = (req.query.sub || '').toString().replace(/[^a-zA-Z0-9_]/g, '').slice(0, 32);
+  const limit = Math.min(parseInt(req.query.limit || '8', 10) || 8, 20);
+  if (!sub) return res.status(400).json({ error: 'sub required' });
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 12000);
+    const r = await fetch('https://www.reddit.com/r/' + sub + '/top.json?limit=' + limit + '&t=week', {
+      signal: ctrl.signal,
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; YellowDogHotBot/1.0; +https://bigyellowdog-web.onrender.com)' }
+    });
+    clearTimeout(t);
+    if (!r.ok) return res.status(502).json({ error: 'Reddit returned ' + r.status });
+    const j = await r.json();
+    const items = (j && j.data && j.data.children || []).map(c => ({
+      title: c.data.title,
+      url: 'https://www.reddit.com' + c.data.permalink,
+      score: c.data.score || 0,
+      num_comments: c.data.num_comments || 0,
+      subreddit: sub
+    })).filter(x => x.title);
+    res.json({ source: 'reddit:' + sub, data: items });
+  } catch (e) {
+    res.status(502).json({ error: e.message || 'reddit fetch failed' });
+  }
+});
+
+/* Hacker News Algolia 代理：50+ 关键词搜索（AI 工具 / 跨境电商 趋势） */
+app.get('/api/hn', async (req, res) => {
+  const query = (req.query.query || '').toString().slice(0, 120);
+  const limit = Math.min(parseInt(req.query.limit || '4', 10) || 4, 10);
+  if (!query) return res.status(400).json({ error: 'query required' });
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 10000);
+    const r = await fetch('https://hn.algolia.com/api/v1/search?query=' + encodeURIComponent(query) + '&tags=story&hitsPerPage=' + limit, {
+      signal: ctrl.signal,
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; YellowDogHotBot/1.0; +https://bigyellowdog-web.onrender.com)' }
+    });
+    clearTimeout(t);
+    if (!r.ok) return res.status(502).json({ error: 'HN returned ' + r.status });
+    const j = await r.json();
+    const items = (j.hits || []).map(h => ({
+      id: h.objectID,
+      title: h.title,
+      url: h.url,
+      score: h.points || 0
+    })).filter(x => x.title);
+    res.json({ source: 'hn:' + query, data: items });
+  } catch (e) {
+    res.status(502).json({ error: e.message || 'hn fetch failed' });
+  }
+});
+
 /* ---------- 智谱代理（owner 在 Render 配 ZHIPU_KEY 一次，全团队免配 Key 即可用 AI） ---------- */
 // 清洗 Key：去掉首尾空格 / 换行 / 以及用户可能误填的 "Bearer " 前缀（否则会变成 "Bearer Bearer xxx" 被智谱拒）
 function normalizeZhipuKey(raw){
