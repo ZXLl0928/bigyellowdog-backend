@@ -237,7 +237,7 @@ app.post('/api/zhipu/v4/chat/completions', async (req, res) => {
   const { messages, model } = req.body || {};
   if (!Array.isArray(messages) || !messages.length) return res.status(200).json({ ok: false, error: 'messages 为空' });
   const useModel = ZHIPU_MODELS.includes(model) ? model : 'glm-5.3';
-  const ctrl = new AbortController(); const t = setTimeout(() => ctrl.abort(), 50000);
+  const ctrl = new AbortController(); const t = setTimeout(() => ctrl.abort(), 120000);  // 智谱生成完整脚本最坏 ~80-100s，120s 留 buffer
   try {
     const r = await fetch('https://open.bigmodel.cn/api/paas/v4/chat/completions', {
       method: 'POST',
