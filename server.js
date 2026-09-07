@@ -175,7 +175,7 @@ const HOT_SOURCES = [
   // 6+ 平台全支持：douyin/weibo/zhihu/bilibili/xiaohongshu/toutiao/baidu/36kr/sspai/ithome/huxiu/kuaishou/csdn/thepaper/qq-news/netease-news
   async (r) => {
     const u = `https://uapis.cn/api/v1/misc/hotboard?type=${encodeURIComponent(r)}&limit=30`;
-    const ctrl = new AbortController(); const t = setTimeout(() => ctrl.abort(), 8000);
+    const ctrl = new AbortController(); const t = setTimeout(() => ctrl.abort(), 25000);
     try {
       const resp = await fetch(u, { signal: ctrl.signal }); clearTimeout(t);
       if (!resp.ok) return null;
@@ -206,7 +206,7 @@ app.get('/api/hot', async (req, res) => {
       // 字符串模板源（旧的）：fetch + transform
       if (out.url) {
         const u = out.url.replace('_LIMIT_', String(limit));
-        const ctrl = new AbortController(); const t = setTimeout(() => ctrl.abort(), 10000);
+        const ctrl = new AbortController(); const t = setTimeout(() => ctrl.abort(), 25000);
         const r = await fetch(u, { signal: ctrl.signal }); clearTimeout(t);
         if (!r.ok) continue;
         const j = await r.json();
