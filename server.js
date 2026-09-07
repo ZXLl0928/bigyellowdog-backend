@@ -234,22 +234,111 @@ app.get('/api/zhipu/ping', (req, res) => {
 
 app.post('/api/zhipu/v4/chat/completions', async (req, res) => {
   if (!ZHIPU_KEY) return res.status(200).json({ ok: false, error: 'ZHIPU_KEY 未配置（请 owner 在 Render 控制台设置后端环境变量 ZHIPU_KEY）' });
-  const { messages, model } = req.body || {};
+  const { messages, model, stream } = req.body || {};
   if (!Array.isArray(messages) || !messages.length) return res.status(200).json({ ok: false, error: 'messages 为空' });
   const useModel = ZHIPU_MODELS.includes(model) ? model : 'glm-5.3';
+  const wantStream = !!stream;
   const ctrl = new AbortController(); const t = setTimeout(() => ctrl.abort(), 120000);  // 智谱生成完整脚本最坏 ~80-100s，120s 留 buffer
   try {
     const r = await fetch('https://open.bigmodel.cn/api/paas/v4/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + ZHIPU_KEY },
-      body: JSON.stringify({ model: useModel, messages, temperature: 0.8, top_p: 0.8, max_tokens: 4000, stream: false }),
+      body: JSON.stringify({ model: useModel, messages, temperature: 0.8, top_p: 0.8, max_tokens: 4000, stream: wantStream }),
       signal: ctrl.signal
     });
-    const j = await r.json();
-    if (!r.ok) return res.status(200).json({ ok: false, error: (j.error && j.error.message) || ('HTTP ' + r.status) });
-    res.json({ ok: true, raw: j, model_used: useModel });
+    if (!r.ok) {
+      const errj = await r.json().catch(() => ({}));
+      return res.status(200).json({ ok: false, error: (errj.error && errj.error.message) || ('HTTP ' + r.status) });
+    }
+    if (!wantStream) {
+      const j = await r.json();
+      return res.json({ ok: true, raw: j, model_used: useModel });
+    }
+    // ===== 流式转发 SSE（打字机效果）=====
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache, no-transform',
+      'Connection': 'keep-alive',
+      'X-Accel-Buffering': 'no'
+    });
+    const reader = r.body.getReader();
+    const decoder = new TextDecoder('utf-8');
+    const ping = setInterval(() => { try { res.write(': keep-alive\n\n'); } catch (e) {} }, 12000);
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        res.write(decoder.decode(value, { stream: true }));
+      }
+    } catch (e) { /* 流中断，静默结束 */ }
+    clearInterval(ping);
+    try { res.write('data: [DONE]\n\n'); } catch (e) {}
+    try { res.end(); } catch (e) {}
   } catch (e) {
-    res.status(200).json({ ok: false, error: e.name === 'AbortError' ? '超时 50s' : (e.message || '智谱请求失败') });
+    if (!res.headersSent) {
+      res.status(200).json({ ok: false, error: e.name === 'AbortError' ? '超时 120s' : (e.message || '智谱请求失败') });
+    } else {
+      try { res.write('data: ' + JSON.stringify({ error: e.message || 'stream error' }) + '\n\n'); } catch (_) {}
+      try { res.end(); } catch (_) {}
+    }
+  } finally { clearTimeout(t); }
+});
+
+/* ---------- 硅基流动代理（稳定免费备用通道：一个 Key 调 100+ 开源模型，含 DeepSeek / Qwen3 / ERNIE / 混元 等免费档） ---------- */
+const SILICONFLOW_KEY = normalizeZhipuKey(process.env.SILICONFLOW_KEY || '');
+
+app.get('/api/engines', (req, res) => {
+  res.json({ zhipu: { configured: !!ZHIPU_KEY, models: ZHIPU_MODELS }, siliconflow: { configured: !!SILICONFLOW_KEY } });
+});
+
+app.post('/api/siliconflow/v4/chat/completions', async (req, res) => {
+  if (!SILICONFLOW_KEY) return res.status(200).json({ ok: false, error: 'SILICONFLOW_KEY 未配置（owner 在 Render 控制台设置环境变量 SILICONFLOW_KEY 即可启用免费备用通道）' });
+  const { messages, model = 'deepseek-ai/DeepSeek-V3', stream } = req.body || {};
+  if (!Array.isArray(messages) || !messages.length) return res.status(200).json({ ok: false, error: 'messages 为空' });
+  const useModel = model;
+  const wantStream = !!stream;
+  const ctrl = new AbortController(); const t = setTimeout(() => ctrl.abort(), 120000);
+  try {
+    const r = await fetch('https://api.siliconflow.cn/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + SILICONFLOW_KEY },
+      body: JSON.stringify({ model: useModel, messages, temperature: 0.8, top_p: 0.8, max_tokens: 4000, stream: wantStream }),
+      signal: ctrl.signal
+    });
+    if (!r.ok) {
+      const errj = await r.json().catch(() => ({}));
+      return res.status(200).json({ ok: false, error: (errj.error && errj.error.message) || ('HTTP ' + r.status) });
+    }
+    if (!wantStream) {
+      const j = await r.json();
+      return res.json({ ok: true, raw: j, model_used: useModel });
+    }
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache, no-transform',
+      'Connection': 'keep-alive',
+      'X-Accel-Buffering': 'no'
+    });
+    const reader = r.body.getReader();
+    const decoder = new TextDecoder('utf-8');
+    const ping = setInterval(() => { try { res.write(': keep-alive\n\n'); } catch (e) {} }, 12000);
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        res.write(decoder.decode(value, { stream: true }));
+      }
+    } catch (e) { /* 流中断，静默结束 */ }
+    clearInterval(ping);
+    try { res.write('data: [DONE]\n\n'); } catch (e) {}
+    try { res.end(); } catch (e) {}
+  } catch (e) {
+    if (!res.headersSent) {
+      res.status(200).json({ ok: false, error: e.name === 'AbortError' ? '超时 120s' : (e.message || '硅基流动请求失败') });
+    } else {
+      try { res.write('data: ' + JSON.stringify({ error: e.message || 'stream error' }) + '\n\n'); } catch (_) {}
+      try { res.end(); } catch (_) {}
+    }
   } finally { clearTimeout(t); }
 });
 
