@@ -450,7 +450,9 @@ app.post('/api/ark/v1/responses', async (req, res) => {
   if(!Array.isArray(messages) || !messages.length) return res.status(200).json({ ok:false, error:'messages 为空' });
   const useModel = reqModel || ARK_MODEL;
   const wantStream = !!stream;
-  const body = { model: useModel, input: toArkInput(messages) };
+  // max_tokens: 8192 避免长脚本（5 段+ N 段 beat）正文被截断
+  // thinking: disabled 强制推理模型不进入思考（避免 reasoning 额度吃光正文额度）
+  const body = { model: useModel, input: toArkInput(messages), max_tokens: 8192, thinking: { type: 'disabled' } };
   // 长生成脚本系统提示词很长，150s 留 buffer
   const ctrl = new AbortController(); const t = setTimeout(()=>ctrl.abort(), 150000);
   try{
