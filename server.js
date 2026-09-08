@@ -353,8 +353,159 @@ app.post('/api/zhipu/v4/chat/completions', async (req, res) => {
 /* ---------- 硅基流动代理（稳定免费备用通道：一个 Key 调 100+ 开源模型，含 DeepSeek / Qwen3 / ERNIE / 混元 等免费档） ---------- */
 const SILICONFLOW_KEY = normalizeZhipuKey(process.env.SILICONFLOW_KEY || '');
 
+/* ---------- 火山引擎方舟（豆包 Doubao Seed-2.1-Pro · 长脚本生成主力） ----------
+ *  必须配置在 Render 后端 Environment → ARK_KEY（火山方舟控制台 https://www.volcengine.com 开通）
+ *  未配置时 Seed-2.1-pro 引擎不可用，前端会自动 fallback 到 Yellow Dog GLM-4-Flash
+ *  接口路径：https://ark.cn-beijing.volces.com/api/v3/responses（OpenAI Responses 格式）
+ *  模型默认：doubao-seed-2-1-pro-260628（260B MoE，长文本/脚本性能强）
+ * ───────────────────────────────────────────────────────────────────────────── */
+const ARK_KEY = normalizeZhipuKey(process.env.ARK_KEY || '');
+const ARK_MODEL = process.env.ARK_MODEL || 'doubao-seed-2-1-pro-260628';
+const ARK_ENDPOINT = 'https://ark.cn-beijing.volces.com/api/v3/responses';
+
 app.get('/api/engines', (req, res) => {
-  res.json({ zhipu: { configured: !!ZHIPU_KEY, models: ZHIPU_MODELS }, siliconflow: { configured: !!SILICONFLOW_KEY } });
+  res.json({
+    zhipu: { configured: !!ZHIPU_KEY, models: ZHIPU_MODELS },
+    siliconflow: { configured: !!SILICONFLOW_KEY },
+    ark: { configured: !!ARK_KEY, model: ARK_MODEL }
+  });
+});
+
+// 把前端 chat 风格的 messages（content 是字符串）转成 ark 的 input（content 是 [{type,text}] 数组）
+function toArkInput(messages){
+  return (messages||[]).map(m=>{
+    const role = m.role;
+    let content;
+    if(Array.isArray(m.content)){
+      // 已经是数组（多模态或已经格式化）—— 直接透传
+      content = m.content;
+    } else {
+      content = [{ type:'input_text', text: String(m.content||'') }];
+    }
+    return { role, content };
+  });
+}
+
+// 从 ark 响应里抠出正文（兼容多种返回结构，跳过 reasoning 思考段）
+function pickArkText(j){
+  // 形式 A: { output: [{ type:'reasoning', summary:[...] }, { type:'message', content:[{text}] }] }
+  if(Array.isArray(j.output)){
+    const txts=[];
+    for(const o of j.output){
+      // ⭐ 跳过推理/思考段：只拿 type==='message' 的正文；reasoning 内容不暴露给用户
+      if(o.type && o.type!=='message') continue;
+      if(Array.isArray(o.content)){
+        for(const c of o.content){
+          if(typeof c.text === 'string') txts.push(c.text);
+        }
+      } else if(typeof o.text === 'string'){
+        txts.push(o.text);
+      }
+    }
+    if(txts.length) return txts.join('');
+  }
+  // 形式 B: { choices: [{ message: { content } }] }（ark 也兼容 OpenAI chat 格式）
+  if(j.choices && j.choices[0]){
+    const ch = j.choices[0];
+    if(ch.message && typeof ch.message.content === 'string') return ch.message.content;
+    if(typeof ch.text === 'string') return ch.text;
+  }
+  // 形式 C: { content: [{ type:'output_text', text }] }
+  if(Array.isArray(j.content)){
+    const txts = j.content.map(c=>c.text||'').filter(Boolean);
+    if(txts.length) return txts.join('');
+  }
+  return '';
+}
+
+// 从 ark SSE 流 delta 中抠增量文本（只取 type='message' 的正文，跳过 reasoning）
+function pickArkDelta(j){
+  // 形式 B: { output: [{ type:'reasoning'|'message', content:[{delta|text}] }] }
+  if(Array.isArray(j.output)){
+    for(const o of j.output){
+      if(o.type && o.type!=='message') continue;   // ⭐ 跳过 reasoning
+      if(Array.isArray(o.content)){
+        for(const c of o.content){
+          if(typeof c.delta === 'string') return c.delta;
+          if(typeof c.text === 'string') return c.text;
+        }
+      } else if(typeof o.delta === 'string') return o.delta;
+      else if(typeof o.text === 'string') return o.text;
+    }
+  }
+  // 形式 A: 顶层 delta/text（少见，但保留）
+  if(typeof j.delta === 'string') return j.delta;
+  if(typeof j.text === 'string') return j.text;
+  // 形式 C: { choices: [{ delta: { content } }] }
+  if(j.choices && j.choices[0]){
+    const ch = j.choices[0];
+    if(ch.delta && typeof ch.delta.content === 'string') return ch.delta.content;
+  }
+  return '';
+}
+
+app.post('/api/ark/v1/responses', async (req, res) => {
+  if(!ARK_KEY) return res.status(200).json({ ok:false, error:'ARK_KEY 未配置' });
+  const { messages, model: reqModel, stream } = req.body || {};
+  if(!Array.isArray(messages) || !messages.length) return res.status(200).json({ ok:false, error:'messages 为空' });
+  const useModel = reqModel || ARK_MODEL;
+  const wantStream = !!stream;
+  const body = { model: useModel, input: toArkInput(messages) };
+  // 长生成脚本系统提示词很长，150s 留 buffer
+  const ctrl = new AbortController(); const t = setTimeout(()=>ctrl.abort(), 150000);
+  try{
+    const r = await fetch(ARK_ENDPOINT, {
+      method:'POST',
+      headers:{ 'Content-Type':'application/json', 'Authorization':'Bearer '+ARK_KEY },
+      body: JSON.stringify({ ...body, stream: wantStream }),
+      signal: ctrl.signal
+    });
+    if(!r.ok){
+      const errj = await r.json().catch(()=>({}));
+      return res.status(200).json({ ok:false, error: (errj.error && (errj.error.message||errj.error.code)) || ('HTTP '+r.status) });
+    }
+    if(!wantStream){
+      const j = await r.json();
+      const txt = pickArkText(j);
+      if(!txt) return res.status(200).json({ ok:false, error:'返回内容为空' });
+      return res.json({ ok:true, raw:j, model_used: useModel });
+    }
+    // ===== 流式 SSE 转发（打字机效果）=====
+    res.writeHead(200, { 'Content-Type':'text/event-stream; charset=utf-8', 'Cache-Control':'no-cache, no-transform', 'Connection':'keep-alive', 'X-Accel-Buffering':'no' });
+    const reader = r.body.getReader(); const decoder = new TextDecoder('utf-8');
+    const ping = setInterval(()=>{ try{ res.write(': keep-alive\n\n'); }catch(_){} }, 12000);
+    try{
+      let buf='';
+      while(true){
+        const { done, value } = await reader.read();
+        if(done) break;
+        buf += decoder.decode(value, { stream:true });
+        const lines = buf.split('\n'); buf = lines.pop();
+        for(const line of lines){
+          const t = line.trim();
+          if(!t || !t.startsWith('data:')) continue;
+          const data = t.slice(5).trim();
+          if(data==='[DONE]') continue;
+          try{
+            const j = JSON.parse(data);
+            if(j.error){ try{ res.write('data: '+JSON.stringify({error:j.error.message||j.error})+'\n\n'); }catch(_){ } continue; }
+            const delta = pickArkDelta(j);
+            if(delta){
+              try{ res.write('data: '+JSON.stringify({choices:[{delta:{content:delta}}]})+'\n\n'); }catch(_){}
+            }
+          }catch(_){ }
+        }
+      }
+    }catch(_){ }
+    clearInterval(ping);
+    try{ res.write('data: [DONE]\n\n'); res.end(); }catch(_){ }
+  }catch(e){
+    if(!res.headersSent){
+      res.status(200).json({ ok:false, error: e.name==='AbortError' ? '超时 150s' : (e.message||'ark 请求失败') });
+    }else{
+      try{ res.write('data: '+JSON.stringify({error:e.message||'stream error'})+'\n\n'); res.end(); }catch(_){ }
+    }
+  }finally{ clearTimeout(t); }
 });
 
 /* ---------- 标题批量翻译（用于 HN/英文热点的中文化；走智谱 glm-4-flash 免费档） ----------
