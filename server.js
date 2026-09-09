@@ -526,11 +526,12 @@ app.post('/api/translate', async (req, res) => {
   if (!needIdx.length) return res.json({ ok: true, translated: items, skipped: items.length });
   // 品牌 / 平台 / 模型名占位保护：送模型前替换成标记，翻译后还原，杜绝被音译
   const BRAND_TOKENS = ['TikTok Shop','Stable Diffusion','DALL·E','OpenAI','ChatGPT','Midjourney','Runway','Anthropic','Perplexity','DeepSeek','Qwen','Kimi','Llama','Mistral','Gemini','Veo','Sora','Claude','Shopify','Amazon','eBay','Temu','Shein','Walmart','AliExpress','Etsy','Pinterest','Reddit','YouTube','Instagram','Facebook','Adobe','Canva','Nvidia','Meta','Microsoft','Google','Grok','Copilot'];
+  // 占位符用纯 ASCII 标记 ZXB0ZX（模型会原样保留，避免 ⟦⟧ 之类的稀有符号被改写导致还原失败）
   const protectBrands = (text) => {
     const map = {}; let i = 0;
     const t = BRAND_TOKENS.slice().sort((a,b)=>b.length-a.length).reduce((acc, tok)=>{
       const re = new RegExp(tok.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'),'gi');
-      return acc.replace(re, m => { const k='⟦B'+(i++)+'⟧'; map[k]=m; return k; });
+      return acc.replace(re, m => { const k='ZXB'+(i++)+'ZX'; map[k]=m; return k; });
     }, text);
     return { t, map };
   };
@@ -544,6 +545,7 @@ app.post('/api/translate', async (req, res) => {
 2. 动词前置 + 数字钩子（中文头条感），不要 "X 是 Y" 句式
 3. 不要 emoji、不要引号、不要 "……" 省略号
 4. 直接输出每条翻译结果，每条一行，不要加任何序号、符号或前缀
+5. 原文中的 ZXB0ZX、ZXB1ZX 这类标记是占位符，必须原样保留、不要翻译也不要删除
 
 待翻译标题（每行一条）：
 ${needIdx.map((i, k) => promptItems[i]).join('\n')}`;
