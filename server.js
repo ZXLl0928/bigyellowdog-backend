@@ -524,18 +524,29 @@ app.post('/api/translate', async (req, res) => {
   const hasChinese = s => (s.match(/[一-龥]/g) || []).length / Math.max(1, s.length);
   const needIdx = items.map((t, i) => hasChinese(t) > 0.3 ? -1 : i).filter(i => i >= 0);
   if (!needIdx.length) return res.json({ ok: true, translated: items, skipped: items.length });
-  const prompt = `你是「跨境电商短视频脚本」的标题编辑。把下面 ${needIdx.length} 条英文/外文资讯标题，改写成符合中文带货短视频头条语境的简体中文标题（每条不超过 20 字）。
+  // 品牌 / 平台 / 模型名占位保护：送模型前替换成标记，翻译后还原，杜绝被音译
+  const BRAND_TOKENS = ['TikTok Shop','Stable Diffusion','DALL·E','OpenAI','ChatGPT','Midjourney','Runway','Anthropic','Perplexity','DeepSeek','Qwen','Kimi','Llama','Mistral','Gemini','Veo','Sora','Claude','Shopify','Amazon','eBay','Temu','Shein','Walmart','AliExpress','Etsy','Pinterest','Reddit','YouTube','Instagram','Facebook','Adobe','Canva','Nvidia','Meta','Microsoft','Google','Grok','Copilot'];
+  const protectBrands = (text) => {
+    const map = {}; let i = 0;
+    const t = BRAND_TOKENS.slice().sort((a,b)=>b.length-a.length).reduce((acc, tok)=>{
+      const re = new RegExp(tok.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'),'gi');
+      return acc.replace(re, m => { const k='⟦B'+(i++)+'⟧'; map[k]=m; return k; });
+    }, text);
+    return { t, map };
+  };
+  const restoreBrands = (text, map) => { let s=text; for (const [k,v] of Object.entries(map)) s=s.split(k).join(v); return s; };
+  const protItems = items.map(it => protectBrands(it));
+  const promptItems = protItems.map(p => p.t);
+  const prompt = `你是「跨境电商短视频脚本」的标题编辑。下面有 ${needIdx.length} 条英文/外文资讯标题，请改写成符合中文带货短视频头条语境的简体中文标题（每条不超过 20 字）。
 
-铁律：
-1. 品牌 / 平台 / 模型 / 工具名一律保留英文原文：Amazon、TikTok Shop、Shopify、GPT、Claude、Sora、Midjourney、Stable Diffusion、Gemini、Veo、Runway、DALL·E 等
-2. 数字、百分号、货币符号保留原文（$99、50%、2.5）
-3. 用中文带货高频词：上线 / 火了 / 登顶 / 拿下 / 出圈 / 杀出 / 爆了
-4. 动词前置 + 数字钩子（中文头条感），不要 "X 是 Y" 句式
-5. 不要 emoji、不要引号、不要 "……" 省略号
+写法要求：
+1. 中文带货高频词：上线 / 火了 / 登顶 / 拿下 / 出圈 / 杀出 / 爆了
+2. 动词前置 + 数字钩子（中文头条感），不要 "X 是 Y" 句式
+3. 不要 emoji、不要引号、不要 "……" 省略号
+4. 直接输出每条翻译结果，每条一行，不要加任何序号、符号或前缀
 
-原标题用 <i>0</i>、<i>1</i>、<i>2</i>…… 占位符分隔（不要保留占位符本身），按相同顺序输出，每行一条，只输出翻译结果。
-
-${needIdx.map((i, k) => `<i>${k}</i> ${items[i]}`).join('\n')}`;
+待翻译标题（每行一条）：
+${needIdx.map((i, k) => promptItems[i]).join('\n')}`;
   const ctrl = new AbortController(); const t = setTimeout(() => ctrl.abort(), 60000);
   try {
     const r = await fetch('https://open.bigmodel.cn/api/paas/v4/chat/completions', {
@@ -548,10 +559,10 @@ ${needIdx.map((i, k) => `<i>${k}</i> ${items[i]}`).join('\n')}`;
     if (!r.ok) { const ej = await r.json().catch(() => ({})); return res.status(200).json({ ok: false, error: (ej.error && ej.error.message) || ('HTTP ' + r.status), translated: items }); }
     const j = await r.json();
     const txt = (j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content) || '';
-    // 按行拆；允许 <i>N</i> 前缀残留；也清理纯数字前缀 "0 "、"1."、"2)"
-    const lines = txt.split(/\n+/).map(s => s.trim()).filter(Boolean).map(s => s.replace(/^(?:<i>\d+<\/i>|\[\d+\]|\(\d+\)|\d+[\.\)、])\s*/, ''));
+    // 按行拆；清理可能残留的 bullet / 占位符前缀（不伤 "2.5" 这类版本号）
+    const lines = txt.split(/\n+/).map(s => s.trim()).filter(Boolean).map(s => s.replace(/^(?:<i>\d+<\/i>|\[\d+\]|\(\d+\)|[\-–—•·\s])+/, ''));
     const out = items.slice();
-    needIdx.forEach((origIdx, k) => { out[origIdx] = (lines[k] || items[origIdx]).trim(); });
+    needIdx.forEach((origIdx, k) => { out[origIdx] = restoreBrands((lines[k] || items[origIdx]).trim(), protItems[origIdx].map); });
     res.json({ ok: true, translated: out, model_used: 'glm-4-flash' });
   } catch (e) {
     try { clearTimeout(t); } catch (_) {}
