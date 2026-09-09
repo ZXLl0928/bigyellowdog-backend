@@ -524,8 +524,17 @@ app.post('/api/translate', async (req, res) => {
   const hasChinese = s => (s.match(/[一-龥]/g) || []).length / Math.max(1, s.length);
   const needIdx = items.map((t, i) => hasChinese(t) > 0.3 ? -1 : i).filter(i => i >= 0);
   if (!needIdx.length) return res.json({ ok: true, translated: items, skipped: items.length });
-  const prompt = `请把下面 ${needIdx.length} 条英文/外文标题翻译成简洁通顺的简体中文，适合做短视频脚本标题（不超过 24 字，不要 emoji，不要加引号）。
-原标题用 <i>0</i>、<i>1</i>、<i>2</i>……占位符分隔（不要保留占位符本身），按相同顺序输出，每行一条，只输出翻译结果。
+  const prompt = `你是「跨境电商短视频脚本」的标题编辑。把下面 ${needIdx.length} 条英文/外文资讯标题，改写成符合中文带货短视频头条语境的简体中文标题（每条不超过 20 字）。
+
+铁律：
+1. 品牌 / 平台 / 模型 / 工具名一律保留英文原文：Amazon、TikTok Shop、Shopify、GPT、Claude、Sora、Midjourney、Stable Diffusion、Gemini、Veo、Runway、DALL·E 等
+2. 数字、百分号、货币符号保留原文（$99、50%、2.5）
+3. 用中文带货高频词：上线 / 火了 / 登顶 / 拿下 / 出圈 / 杀出 / 爆了
+4. 动词前置 + 数字钩子（中文头条感），不要 "X 是 Y" 句式
+5. 不要 emoji、不要引号、不要 "……" 省略号
+
+原标题用 <i>0</i>、<i>1</i>、<i>2</i>…… 占位符分隔（不要保留占位符本身），按相同顺序输出，每行一条，只输出翻译结果。
+
 ${needIdx.map((i, k) => `<i>${k}</i> ${items[i]}`).join('\n')}`;
   const ctrl = new AbortController(); const t = setTimeout(() => ctrl.abort(), 60000);
   try {
